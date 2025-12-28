@@ -1,4 +1,5 @@
 import os
+import logging
 from typing import Tuple, List
 import pandas as pd
 import numpy as np
@@ -7,6 +8,13 @@ from imblearn.over_sampling import SMOTE
 import warnings
 
 warnings.filterwarnings('ignore')
+
+# Configure logging
+logging.basicConfig(
+    level=logging.INFO,
+    format='%(asctime)s - %(name)s - %(levelname)s - %(message)s'
+)
+logger = logging.getLogger(__name__)
 
 REQUIRED_FRAUD_COLUMNS: List[str] = [
     'user_id', 'signup_time', 'purchase_time', 'purchase_value', 'device_id',
@@ -34,17 +42,24 @@ def load_data(
     - FileNotFoundError with informative message if a file is missing
     - ValueError if loaded objects are empty
     """
+    logger.info(f"Loading fraud data from: {fraud_path}")
+    logger.info(f"Loading IP-country data from: {ip_country_path}")
+    
     try:
         if not os.path.exists(fraud_path):
+            logger.error(f"Fraud data file not found: {fraud_path}")
             raise FileNotFoundError(f"Fraud data file not found: {fraud_path}")
         if not os.path.exists(ip_country_path):
+            logger.error(f"IP-country file not found: {ip_country_path}")
             raise FileNotFoundError(f"IP-country file not found: {ip_country_path}")
 
         fraud_data = pd.read_csv(fraud_path)
         ip_country = pd.read_csv(ip_country_path)
+        logger.info(f"Loaded {len(fraud_data)} fraud records and {len(ip_country)} IP ranges")
     except FileNotFoundError:
         raise
     except Exception as e:
+        logger.error(f"Failed to read CSV files: {e}")
         raise RuntimeError(f"Failed to read CSV files: {e}")
 
     if fraud_data is None or fraud_data.empty:
@@ -78,33 +93,39 @@ def clean_data(fraud_data: pd.DataFrame, ip_country: pd.DataFrame) -> Tuple[pd.D
     Raises:
     - ValueError for missing columns or invalid types
     """
+    logger.info("Validating required columns...")
     _validate_required_columns(fraud_data, REQUIRED_FRAUD_COLUMNS, 'fraud_data')
     _validate_required_columns(ip_country, REQUIRED_IP_COLUMNS, 'ip_country')
+    logger.info("Column validation passed")
 
     # Report missing values
+    logger.info("Checking for missing values...")
     missing_fraud = fraud_data.isnull().sum()
     missing_ip = ip_country.isnull().sum()
     if missing_fraud.any():
-        print('Missing values in Fraud Data:')
-        print(missing_fraud[missing_fraud > 0])
+        logger.warning(f'Missing values in Fraud Data:\n{missing_fraud[missing_fraud > 0]}')
     if missing_ip.any():
-        print('Missing values in IP Country:')
-        print(missing_ip[missing_ip > 0])
+        logger.warning(f'Missing values in IP Country:\n{missing_ip[missing_ip > 0]}')
 
     # Drop rows with missing values in critical fields
+    logger.info("Dropping rows with missing critical values...")
     fraud_data = fraud_data.dropna(subset=['signup_time', 'purchase_time', 'purchase_value', 'ip_address', 'class'])
     ip_country = ip_country.dropna(subset=['lower_bound_ip_address', 'upper_bound_ip_address', 'country'])
+    logger.info(f"After dropping NaNs: {len(fraud_data)} fraud records, {len(ip_country)} IP ranges")
 
     # Remove duplicates
     if fraud_data.duplicated().any():
-        print('Duplicates in Fraud Data:', fraud_data.duplicated().sum())
+        dup_count = fraud_data.duplicated().sum()
+        logger.info(f'Found {dup_count} duplicates in Fraud Data, removing...')
         fraud_data = fraud_data.drop_duplicates()
 
     # Convert data types with safety
+    logger.info("Converting data types...")
     for dt_col in ['signup_time', 'purchase_time']:
         try:
             fraud_data[dt_col] = pd.to_datetime(fraud_data[dt_col], errors='coerce')
         except Exception as e:
+            logger.error(f"Failed to convert {dt_col} to datetime: {e}")
             raise ValueError(f"Failed to convert {dt_col} to datetime: {e}")
     # Ensure datetimes were parsed
     if fraud_data[['signup_time', 'purchase_time']].isnull().any().any():
@@ -139,11 +160,13 @@ def merge_geolocation(fraud_data: pd.DataFrame, ip_country: pd.DataFrame) -> pd.
     Raises:
     - ValueError if required columns are missing
     """
+    logger.info("Merging geolocation data...")
     _validate_required_columns(fraud_data, ['ip_address'], 'fraud_data')
     _validate_required_columns(ip_country, REQUIRED_IP_COLUMNS, 'ip_country')
 
     # Sort ip_country for efficient lookup
     ip_country = ip_country.sort_values('lower_bound_ip_address').reset_index(drop=True)
+    logger.info(f"Processing {len(fraud_data)} IP addresses...")
 
     def find_country(ip: int) -> str:
         mask = (ip_country['lower_bound_ip_address'] <= ip) & (ip_country['upper_bound_ip_address'] >= ip)
@@ -154,6 +177,7 @@ def merge_geolocation(fraud_data: pd.DataFrame, ip_country: pd.DataFrame) -> pd.
 
     fraud_data = fraud_data.copy()
     fraud_data['country'] = fraud_data['ip_address'].apply(find_country)
+    logger.info(f"Geolocation merge complete. Unknown IPs: {(fraud_data['country'] == 'Unknown').sum()}")
     return fraud_data
 
 def feature_engineering(fraud_data: pd.DataFrame) -> pd.DataFrame:
@@ -168,6 +192,7 @@ def feature_engineering(fraud_data: pd.DataFrame) -> pd.DataFrame:
     Raises:
     - ValueError if required columns are missing
     """
+    logger.info("Engineering features...")
     _validate_required_columns(fraud_data, ['signup_time', 'purchase_time', 'user_id'], 'fraud_data')
 
     fraud_data = fraud_data.copy()
@@ -182,6 +207,7 @@ def feature_engineering(fraud_data: pd.DataFrame) -> pd.DataFrame:
     fraud_data = fraud_data.sort_values(['user_id', 'purchase_time'])
     fraud_data['transaction_count'] = fraud_data.groupby('user_id').cumcount() + 1
 
+    logger.info("Feature engineering complete. Created: hour_of_day, day_of_week, time_since_signup, transaction_count")
     return fraud_data
 
 def transform_data(fraud_data: pd.DataFrame):
@@ -199,6 +225,7 @@ def transform_data(fraud_data: pd.DataFrame):
     numerical_cols = ['purchase_value', 'age', 'time_since_signup', 'transaction_count']
     categorical_cols = ['source', 'browser', 'sex', 'country']
 
+    logger.info("Transforming features...")
     # Validate columns
     _validate_required_columns(fraud_data, numerical_cols, 'fraud_data (numerical)')
     _validate_required_columns(fraud_data, categorical_cols, 'fraud_data (categorical)')
@@ -209,14 +236,17 @@ def transform_data(fraud_data: pd.DataFrame):
     if fraud_data[numerical_cols].isnull().any().any():
         raise ValueError('Numerical columns contain NaN after coercion; check inputs.')
 
+    logger.info(f"Scaling numerical features: {numerical_cols}")
     scaler = StandardScaler()
     fraud_data[numerical_cols] = scaler.fit_transform(fraud_data[numerical_cols])
 
-    encoder = OneHotEncoder(sparse=False, drop='first', handle_unknown='ignore')
+    logger.info(f"One-hot encoding categorical features: {categorical_cols}")
+    encoder = OneHotEncoder(sparse_output=False, drop='first', handle_unknown='ignore')
     encoded = encoder.fit_transform(fraud_data[categorical_cols])
     encoded_df = pd.DataFrame(encoded, columns=encoder.get_feature_names_out(categorical_cols), index=fraud_data.index)
     fraud_data = pd.concat([fraud_data.drop(categorical_cols, axis=1), encoded_df], axis=1)
 
+    logger.info(f"Transformation complete. Final shape: {fraud_data.shape}")
     return fraud_data, scaler, encoder
 
 def handle_imbalance(X: pd.DataFrame, y: pd.Series):
@@ -232,23 +262,25 @@ def handle_imbalance(X: pd.DataFrame, y: pd.Series):
     Raises:
     - ValueError if y is not binary or has insufficient minority samples
     """
+    logger.info("Handling class imbalance with SMOTE...")
     if not isinstance(y, (pd.Series, np.ndarray)):
+        logger.error('y must be a pandas Series or NumPy array')
         raise ValueError('y must be a pandas Series or NumPy array')
     y_series = pd.Series(y)
     if y_series.nunique() != 2:
+        logger.error('y must be binary for SMOTE')
         raise ValueError('y must be binary for SMOTE')
 
-    print('Original class distribution:')
-    print(y_series.value_counts())
+    logger.info(f'Original class distribution: {y_series.value_counts().to_dict()}')
 
     smote = SMOTE(random_state=42)
     try:
         X_resampled, y_resampled = smote.fit_resample(X, y_series)
     except ValueError as e:
+        logger.error(f"SMOTE failed: {e}")
         raise ValueError(f"SMOTE failed: {e}")
 
-    print('After SMOTE:')
-    print(pd.Series(y_resampled).value_counts())
+    logger.info(f'After SMOTE: {pd.Series(y_resampled).value_counts().to_dict()}')
     return X_resampled, y_resampled, smote
 
 def main():
@@ -257,6 +289,10 @@ def main():
     Loads data, validates and cleans, enriches with geolocation, engineers features,
     transforms features, applies SMOTE, and saves processed dataset to CSV.
     """
+    logger.info("="*60)
+    logger.info("Starting preprocessing pipeline")
+    logger.info("="*60)
+    
     try:
         # Load
         fraud_data, ip_country = load_data()
@@ -292,11 +328,12 @@ def main():
         os.makedirs(os.path.dirname(output_path), exist_ok=True)
         processed_df = pd.concat([X_final, y_final.rename('class')], axis=1)
         processed_df.to_csv(output_path, index=False)
-        print(f'Processed data saved to {output_path}')
+        logger.info(f'Processed data saved to {output_path}')
+        logger.info(f'Final dataset shape: {processed_df.shape}')
     except Exception as e:
         # Provide informative error and non-zero exit for CLI context
         msg = f"Preprocessing failed: {e}"
-        print(msg)
+        logger.error(msg)
         raise
 
 
